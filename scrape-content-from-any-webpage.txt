@@ -1,0 +1,347 @@
+<?php
+add_action('admin_menu', 'add_acs_menu_page');
+
+function add_acs_menu_page() {
+    add_menu_page('Page Scrapper', 'Page Scrapper', 'manage_options', 'page-scrapper', 'scrape_articles_from_any_webpage','dashicons-welcome-widgets-menus');
+}
+
+function scrape_articles_from_any_webpage(){
+ ?>
+ <div class="wrap">
+ <div style="height:15px;"></div>
+  <div class="notification"></div>
+  <h2 style="display:none;" class="more-field">To scrape more click <a href="javascript:void(0)" id="addMe">Here</a></h2>
+    <div id="loading">
+     <img src="<?php echo plugins_url('images/loading.gif', __FILE__); ?>" />
+     <span class="loading-text">Your data is scrapping...</span>
+  </div>
+  <div class="form-section">
+    <div class="heading-info">
+      <h2>Enter page URL ( https://example.com ) to scrape information and create new post by this scrapped information.</h2>
+    </div>
+    <form action="" method="post">
+      <div class="field-control">
+        <label>Enter page url:</label>
+        <input type="text" name="url" value="" class="scpurl" id="srpUrl" />
+      </div>
+      <div class="field-control">
+         <input type="submit" name="submit" value="Submit" class="button button-primary button-large" id="scrapeclt" />
+      </div>
+    </form>
+  </div>
+</div>
+ <?php
+}
+
+
+add_action( 'wp_ajax_scrape_acs_data', 'ajax_scrape_acs_page_data' );
+
+function ajax_scrape_acs_page_data() {
+	
+ini_set('max_execution_time', 3600); //300 seconds = 5 minutes
+
+
+$spurl =  $_REQUEST['data']; 
+
+if(empty($spurl)){
+  echo 'URL empty!';
+  wp_die();
+}
+   
+$html = '';
+    
+include_once("simplehtmldom_1_5/simple_html_dom.php"); 
+
+$html = file_get_contents($spurl, true); 
+    
+ $post_info = scrape_content_from_webpage($html);
+
+
+// print_r($post_info);
+
+if(is_array($post_info) && $post_info['title'])
+  $p_id = create_post_on_website($post_info, $spurl);
+else
+  echo 'Failed! Please try another URL'; 
+
+if($p_id)
+  echo 'Success! Your post is created successfully after scrape post info from here '.$spurl;
+
+ unset($post_info);
+ 
+ wp_die();
+}
+
+function scrape_content_from_webpage($html){
+
+  $html_base = new simple_html_dom();
+
+  // Load HTML from a string
+  $html_base->load($html);
+
+  // get the post title
+  foreach($html_base->find('.story-title a') as $news_title){ // replace class here to your html class
+        $post_info['title'] = $news_title->plaintext;
+        break;
+  } 
+      
+  // get the post author name
+  foreach($html_base->find('.author-name a') as $news_author) {
+       $post_info['author'] = $news_author->plaintext;     
+  } 
+
+   // get the post description
+  foreach($html_base->find('.content-section .story-section #story-full-content .story-column .story-intro') as $news_descrp) {
+       $desc_intro = preg_replace("#<div class='story-image-wrapper'> <figure class='width-(.*?)</figure> </div>#", '', $news_descrp->innertext); 
+       break;   
+  }
+
+  foreach($html_base->find('.content-section .story-section #story-full-content .story-column .story-body') as $news_descrp) {
+       $desc_body = $news_descrp->innertext; 
+       break;   
+  }
+
+  if($desc_body != ''){
+    $post_info['desc'] = $desc_intro.$desc_body;
+  }else{
+    $post_info['desc'] = $desc_intro;
+  }
+
+  // get the post tags 
+  foreach($html_base->find('.story-tags-wrapper #story-tag > li') as $news_tags) {
+       $post_info['tags'][] = $news_tags->plaintext;
+  }
+
+    
+  // get the post featured image URL
+  foreach($html_base->find('meta[name="twitter:image:src"]') as $news_image) {
+       $post_info['image'] = $news_image->content;
+       break;
+  }
+
+   $html_base->clear(); 
+   unset($html_base); 
+
+  return $post_info;
+
+}
+
+
+function create_post_on_website($pt_info, $art_link = ''){
+      
+     // creating post array
+    $post_data['post_title']        = isset($pt_info['title'])?$pt_info['title']:' ';
+    $post_data['post_author']       = 2;
+
+    $post_data['post_date']         = current_time( 'mysql' );
+    $post_data['post_date_gmt']     = current_time( 'mysql' );
+    $post_data['post_modified']     = current_time( 'mysql' );
+    $post_data['post_modified_gmt'] = current_time( 'mysql' );
+
+    $post_data['post_content']      = isset($pt_info['desc'])?$pt_info['desc']:' ';
+    $post_data['post_status']       = 'draft';
+    $post_data['post_type']         = 'post';
+
+    // Insert the post into the database.
+     $post_id = wp_insert_post( $post_data );
+    
+      // add tags to this post
+      create_scrapping_tags_in_wp($pt_info['tags'],$post_id); 
+
+      // add categories to this post
+      if($pt_info['cat'])
+      create_scrapping_cat_in_wp($pt_info['cat'],$post_id); 
+     
+     if(isset($pt_info['image']) && $pt_info['image'] != '')
+       $attachment_id = acs_insert_custom_attachment($pt_info['image'],$post_id);
+
+     if(isset($attachment_id))
+       set_post_thumbnail( $post_id, $attachment_id );
+
+    // set original author    
+     add_post_meta($post_id,'author',$pt_info['author']); 
+     $theme_settings['td_source_url'] = $art_link;
+     add_post_meta($post_id,'td_post_theme_settings',$theme_settings);     
+
+   return $post_id;  
+}
+
+function create_scrapping_tags_in_wp($tag_names,$post_id){
+
+ foreach($tag_names as $tag_name){
+    $term_exist = term_exists( $tag_name, 'post_tag' );
+
+    if ( $term_exist == 0 && $term_exist == null ) {
+        $terms = wp_insert_term(
+        $tag_name, // the term 
+        'post_tag', // the taxonomy
+          array(
+            'description'=> $tag_name.' tag.',
+            'slug' => sanitize_title($tag_name),
+            'parent'=> false  // get numeric term id
+          )
+        );
+      $terms_id[] = (int) $terms['term_id'];
+      
+    }else{
+      $terms_id[] = (int) $term_exist['term_id'];
+    }
+  }
+
+  wp_set_post_terms( $post_id, $terms_id, 'post_tag', true ); // set tags to post
+}
+
+function create_scrapping_cat_in_wp($cat_names,$p_id){
+
+ foreach($cat_names as $cat_name){
+    $term_exist = term_exists( $cat_name, 'category' );
+
+    if ( $term_exist == 0 && $term_exist == null ) {
+        $terms = wp_insert_term(
+        $cat_name, // the term 
+        'category', // the taxonomy
+          array(
+            'description'=> $cat_name.' Category',
+            'slug' => sanitize_title($cat_name),
+            'parent'=> false  // get numeric term id
+          )
+        );
+      $terms_id[] = (int) $terms['term_id'];
+      
+    }else{
+      $terms_id[] = (int) $term_exist['term_id'];
+    }
+  }
+
+  wp_set_post_terms( $p_id, $terms_id, 'category', true ); // set category to post
+}
+
+function acs_insert_custom_attachment($fileUrl, $post_id){
+
+  $pathinfo = pathinfo($fileUrl);
+  if(strstr($pathinfo['extension'],"?")){
+   $extension = explode("?",$pathinfo['extension']);
+   $ext = $extension[0];
+  }
+  else{
+   $ext = $pathinfo['extension'];
+  }
+
+  if(isset($pathinfo['extension']))
+     $filename = $pathinfo['filename'].'.'.$ext;
+  else
+  	 $filename = "image-$post_id.jpg";   // if image does not have extension in its url 
+   
+    $uploaddir = wp_upload_dir();
+    $uploadfile = $uploaddir['path'] . '/' . $filename;
+
+    $contents = file_get_contents($fileUrl);
+
+    $savefile = fopen($uploadfile, 'w');
+    fwrite($savefile, $contents);
+    fclose($savefile);
+
+    $wp_filetype = wp_check_filetype(basename($filename), null );
+
+    $attachment = array(
+        'post_mime_type' => $wp_filetype['type'],
+        'post_title' => $filename,
+        'post_content' => '',
+        'post_status' => 'inherit'
+    );
+
+    $attach_id = wp_insert_attachment( $attachment, $uploadfile );
+
+    $imagenew = get_post( $attach_id );
+    $fullsizepath = get_attached_file( $imagenew->ID );
+    $attach_data = wp_generate_attachment_metadata( $attach_id, $fullsizepath );
+    wp_update_attachment_metadata( $attach_id, $attach_data );
+
+    return $attach_id;
+}
+?>
+<script type="text/javascript">
+     jQuery(document).ready(function($){
+       $('#scrapeclt').click(function (e) {  
+          e.preventDefault();
+          
+          $('.form-section').fadeOut('slow');           
+          $('#loading').fadeIn('slow');
+
+          var srpUrl = $('#srpUrl').val();   
+              
+           $.post(ajaxurl, 
+          {
+              'action': 'scrape_acs_data',
+              'data':   srpUrl
+          }, 
+          function(response){   
+               $("#srpUrl").val('');         
+             $('#loading').fadeOut('slow');     
+             $('.notification').fadeIn('slow').text(response);             
+               $('.more-field').fadeIn();
+          }
+        );
+         
+       });  
+      $("#addMe").click(function(){
+        $(this).parents("h2.more-field").hide("slow");
+        $('.form-section').fadeIn('slow');
+      });        
+     });     
+ </script>
+ <style type="text/css">
+  .notice{
+    display: none;
+  }
+  .notification {
+  background-color: #dff0d8;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #3c763d;
+  margin-bottom: 20px;
+  padding: 11px 20px;
+  width: 60%;
+  display: none;
+}
+
+.wrap #loading {
+  background: #fff;
+  padding: 20px;  
+  width: 61%;
+  display: none;
+}
+#loading > img {
+  margin: 0 auto;
+  display: block;
+  max-height: 270px
+}
+
+#loading .loading-text {
+  text-align: center;
+  margin: 0 auto;
+  display: block;
+  font-size: 17px;
+  color: #444;
+}
+
+.scpurl {
+  padding: 6px;
+  width: 65%;
+}
+
+.download-csv{
+display: none;
+}
+
+#scrape {
+  margin-left: 8%;
+  margin-top: 1%;
+}
+
+.clear{
+clear: both;
+margin: 0;
+padding: 0;
+}
+ </style>
